@@ -1,3 +1,25 @@
+# Build artifacts
+build/
+*.dylib
+*.so
+*.o
+*.d
+
+# Data (vector stores generated locally)
+data/*.bin
+data/*.json
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Original brainstorming doc — absorbed into README.md + CLAUDE.md
 Monocle_Handoff.md
-CLAUDE.md
-.claude
