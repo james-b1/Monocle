@@ -93,6 +93,10 @@ End-to-end test: "Search my Digital Logic notes for the truth table for a JK Fli
 
 The goal is that James can always go read where something comes from. Every concept introduced, every library used, every API called should have a pointer to the authoritative source.
 
+## Keep the README Runnable
+
+**Any time you add a new command, script, make target, dependency, or workflow, update `README.md` in the same turn.** James runs and verifies the code himself between sessions; a stale README breaks that loop. If these CLAUDE.md rules themselves change, update them here too. Don't defer doc updates.
+
 ---
 
 ## Environment

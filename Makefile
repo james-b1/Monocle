@@ -6,18 +6,25 @@ SRC_DIR  := cpp/src
 INC_DIR  := cpp/include
 BUILD    := build
 
-SRCS := $(wildcard $(SRC_DIR)/*.cpp)
-OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD)/%.o)
-LIB  := $(BUILD)/libmonocle.dylib
+LIB_SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+LIB_OBJS := $(LIB_SRCS:$(SRC_DIR)/%.cpp=$(BUILD)/%.o)
+LIB      := $(BUILD)/libmonocle.dylib
 
-.PHONY: all clean
+BENCH_SRC := cpp/bench/bench.cpp
+BENCH_BIN := $(BUILD)/bench_scalar
+
+.PHONY: all bench clean
 all: $(LIB)
+bench: $(BENCH_BIN)
 
-$(LIB): $(OBJS) | $(BUILD)
+$(LIB): $(LIB_OBJS) | $(BUILD)
 	$(CXX) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/%.o: $(SRC_DIR)/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -c -o $@ $<
+
+$(BENCH_BIN): $(BENCH_SRC) $(BUILD)/search.o | $(BUILD)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(SRC_DIR) -o $@ $^
 
 $(BUILD):
 	mkdir -p $(BUILD)

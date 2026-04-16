@@ -55,6 +55,63 @@ Claude Code CLI
 - Python: 3.11+
 - Key deps: `sentence-transformers`, `langgraph`, `langchain`, `ollama`, `mcp`, `numpy`
 
+## Getting Started
+
+### Prerequisites
+
+- macOS on Apple Silicon (M-series)
+- Xcode or Xcode Command Line Tools (provides `clang++` and `make`). Verify: `xcode-select -p`
+- Python 3.11+
+
+### First-time setup
+
+```bash
+# From the project root
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Build the C++ library
+
+```bash
+make          # builds build/libmonocle.dylib
+make clean    # wipes build/
+```
+
+## Running the Current Code (Phase 1, through step 4)
+
+```bash
+# 1. Sanity check: verify the .dylib loads and Python can call into it
+python sanity_check.py
+
+# 2. Generate 50,000 synthetic unit-normalized vectors + a query vector
+#    Writes: data/vectors.bin, data/query.bin, data/ground_truth.json
+python scripts/generate_synthetic.py
+#    Knobs: --n 50000  --dim 384  --k 10  --seed 42  --out data
+
+# 3. Verify the scalar C++ dot product matches numpy's ground truth
+python scripts/verify_scalar.py
+
+# 4. Benchmark the scalar dot product over 50k vectors
+make bench
+./build/bench_scalar
+```
+
+Expected outcome of step 3: all 10 top-k indices match numpy exactly; max score difference ~1e-7 (one float32 ULP — explained in the conversation around step 3).
+
+Expected outcome of step 4 (approximate, will vary by a few percent):
+- Mean latency: ~11.6 ms over 50k vectors × 384 dims (M4)
+- Throughput: ~3.3 GFLOPs (~82% of single-core scalar peak)
+- Compute-bound, not memory-bound — SIMD in step 5 should give ~8–16× speedup
+
 ## Status
 
 Currently in **Phase 1** — building the C++ vector search engine.
+- [x] Step 1: Project scaffolding + FFI skeleton
+- [x] Step 2: Synthetic vector generator + ground truth
+- [x] Step 3: Scalar C++ dot product (correctness verified)
+- [x] Step 4: Benchmark harness — scalar baseline: 11.65 ms mean, 3.30 GFLOPs
+- [ ] Step 5: ARM Neon SIMD rewrite (target: break 2 ms)
+- [ ] Step 6: Top-k selection
+- [ ] Step 7: `.dylib` + ctypes end-to-end
