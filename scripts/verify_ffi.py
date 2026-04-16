@@ -1,6 +1,5 @@
-"""Verify the C++ FFI kernel matches the numpy ground truth.
+"""Verify the production Index.search API matches the numpy ground truth.
 
-The FFI dispatches to whichever kernel is currently production (Neon as of step 5).
 Run after `make` and `python scripts/generate_synthetic.py`.
 """
 
@@ -17,19 +16,15 @@ from monocle import ffi
 def main() -> int:
     data = Path("data")
     ground_truth = json.loads((data / "ground_truth.json").read_text())
-    n, dim, k = ground_truth["n"], ground_truth["dim"], ground_truth["k"]
+    k = ground_truth["k"]
 
-    vectors = np.fromfile(data / "vectors.bin", dtype=np.float32).reshape(n, dim)
     query = np.fromfile(data / "query.bin", dtype=np.float32)
-    scores = np.zeros(n, dtype=np.float32)
 
-    rc = ffi.dot_product_scores(vectors, query, scores)
-    if rc != 0:
-        print(f"C++ returned error code {rc}")
-        return 1
-
-    cpp_top_k = np.argsort(scores)[::-1][:k]
-    cpp_top_k_scores = scores[cpp_top_k]
+    with ffi.Index(data / "vectors.bin", dim=ground_truth["dim"]) as idx:
+        if idx.size != ground_truth["n"]:
+            print(f"Size mismatch: index has {idx.size}, expected {ground_truth['n']}")
+            return 1
+        cpp_idx, cpp_scores = idx.search(query, k=k)
 
     expected_idx = ground_truth["indices"]
     expected_scores = np.array(ground_truth["scores"], dtype=np.float64)
@@ -38,14 +33,14 @@ def main() -> int:
     print("-" * 65)
     for rank in range(k):
         exp_i = expected_idx[rank]
-        got_i = int(cpp_top_k[rank])
-        diff = abs(float(expected_scores[rank]) - float(cpp_top_k_scores[rank]))
+        got_i = int(cpp_idx[rank])
+        diff = abs(float(expected_scores[rank]) - float(cpp_scores[rank]))
         status = "OK" if exp_i == got_i else "MISMATCH"
         print(f"{rank + 1:<6}{exp_i:<15}{got_i:<12}{diff:.2e}       {status}")
 
-    indices_match = expected_idx == cpp_top_k.tolist()
+    indices_match = expected_idx == cpp_idx.tolist()
     max_diff = float(
-        np.max(np.abs(expected_scores - cpp_top_k_scores.astype(np.float64)))
+        np.max(np.abs(expected_scores - cpp_scores.astype(np.float64)))
     )
     print(f"\nTop-{k} indices match: {indices_match}")
     print(f"Max score diff: {max_diff:.2e}")

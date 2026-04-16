@@ -79,44 +79,66 @@ make          # builds build/libmonocle.dylib
 make clean    # wipes build/
 ```
 
-## Running the Current Code (Phase 1, through step 5)
+## Running Phase 1 (complete)
 
 ```bash
-# 1. Sanity check: verify the .dylib loads and Python can call into it
-python sanity_check.py
-
-# 2. Generate 50,000 synthetic unit-normalized vectors + a query vector
+# 1. Generate 50,000 synthetic unit-normalized vectors + a query vector
 #    Writes: data/vectors.bin, data/query.bin, data/ground_truth.json
 python scripts/generate_synthetic.py
 #    Knobs: --n 50000  --dim 384  --k 10  --seed 42  --out data
 
-# 3. Verify the C++ FFI kernel (Neon) matches numpy's ground truth
+# 2. End-to-end smoke test: load, search, print top-5
+python sanity_check.py
+
+# 3. Verify the production API matches numpy ground truth
 python scripts/verify_ffi.py
 
-# 4 & 5. Three-way benchmark: scalar vs. compiler-autovec vs. hand-written Neon
+# 4. Benchmark all four kernels + correctness check of top-k vs full-sort
 make bench
 ./build/bench
 ```
 
-Expected outcome of step 3 verifier:
-- All 10 top-k indices match numpy exactly
-- Max score diff ~1e-7 or smaller (float32 precision — explained in conversation)
+### Using the Python API
 
-Expected outcome of the benchmark (approximate, will vary ~10% run-to-run):
+```python
+from monocle import ffi
+import numpy as np
+
+query = np.fromfile("data/query.bin", dtype=np.float32)
+
+with ffi.Index("data/vectors.bin", dim=384) as idx:
+    indices, scores = idx.search(query, k=10)
+# indices: np.int32 array of length k, descending score order
+# scores:  np.float32 array of length k
+```
+
+The `Index` is mmap-backed; load is instant. Safe to share across threads for concurrent reads.
+
+### Expected outcome
+
+Verifier (step 3):
+- All 10 top-k indices match numpy exactly
+- Max score diff ~3e-8 or smaller (float32 precision)
+
+Benchmark (approximate, varies ~10% run-to-run):
 
 | Kernel | Mean latency | GFLOPs | Speedup vs scalar |
 |---|---|---|---|
 | scalar (forced) | ~11.4 ms | ~3.3 | 1.00× |
 | autovec (compiler) | ~5.9 ms | ~6.6 | ~1.9× |
-| **neon (hand-written)** | **~1.0 ms** | **~38.6** | **~11.5×** |
+| neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
+| **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
 ## Status
 
-Currently in **Phase 1** — building the C++ vector search engine.
+**Phase 1 complete.** Ready for Phase 2 (Python ingestor — crawl docs, chunk, embed, write vectors.bin).
+
 - [x] Step 1: Project scaffolding + FFI skeleton
 - [x] Step 2: Synthetic vector generator + ground truth
-- [x] Step 3: Scalar C++ dot product (correctness verified)
-- [x] Step 4: Benchmark harness — scalar baseline: ~11.4 ms mean, 3.3 GFLOPs
-- [x] Step 5: ARM Neon SIMD — **~1.0 ms mean, 38.6 GFLOPs, 11.5× speedup** (now the production kernel)
-- [ ] Step 6: Top-k selection
-- [ ] Step 7: `.dylib` + ctypes end-to-end
+- [x] Step 3: Scalar C++ dot product (correctness verified against numpy)
+- [x] Step 4: Benchmark harness — scalar baseline: ~11.4 ms, 3.3 GFLOPs
+- [x] Step 5: ARM Neon SIMD — ~1.0 ms, 38.9 GFLOPs, 11.6× speedup over scalar
+- [x] Step 6: Fused top-k via O(N log k) min-heap (zero intermediate array)
+- [x] Step 7: Opaque `Index` handle, mmap-backed load, thread-safe concurrent search
+
+**Phase 1 headline:** 0.98 ms top-10 search over 50,000 × 384-dim vectors on M4, reproducible via `./build/bench`.
