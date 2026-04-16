@@ -18,8 +18,8 @@ venv/
 
 # Editor / OS
 .DS_Store
-.vscode/
 .idea/
+# (note: .vscode/ is intentionally committed — c_cpp_properties.json is project config)
 
 # Original brainstorming doc — absorbed into README.md + CLAUDE.md
 Monocle_Handoff.md
