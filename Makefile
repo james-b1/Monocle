@@ -11,7 +11,7 @@ LIB_OBJS := $(LIB_SRCS:$(SRC_DIR)/%.cpp=$(BUILD)/%.o)
 LIB      := $(BUILD)/libmonocle.dylib
 
 BENCH_SRC := cpp/bench/bench.cpp
-BENCH_BIN := $(BUILD)/bench_scalar
+BENCH_BIN := $(BUILD)/bench
 
 .PHONY: all bench clean
 all: $(LIB)

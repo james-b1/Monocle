@@ -79,7 +79,7 @@ make          # builds build/libmonocle.dylib
 make clean    # wipes build/
 ```
 
-## Running the Current Code (Phase 1, through step 4)
+## Running the Current Code (Phase 1, through step 5)
 
 ```bash
 # 1. Sanity check: verify the .dylib loads and Python can call into it
@@ -90,20 +90,25 @@ python sanity_check.py
 python scripts/generate_synthetic.py
 #    Knobs: --n 50000  --dim 384  --k 10  --seed 42  --out data
 
-# 3. Verify the scalar C++ dot product matches numpy's ground truth
-python scripts/verify_scalar.py
+# 3. Verify the C++ FFI kernel (Neon) matches numpy's ground truth
+python scripts/verify_ffi.py
 
-# 4. Benchmark the scalar dot product over 50k vectors
+# 4 & 5. Three-way benchmark: scalar vs. compiler-autovec vs. hand-written Neon
 make bench
-./build/bench_scalar
+./build/bench
 ```
 
-Expected outcome of step 3: all 10 top-k indices match numpy exactly; max score difference ~1e-7 (one float32 ULP — explained in the conversation around step 3).
+Expected outcome of step 3 verifier:
+- All 10 top-k indices match numpy exactly
+- Max score diff ~1e-7 or smaller (float32 precision — explained in conversation)
 
-Expected outcome of step 4 (approximate, will vary by a few percent):
-- Mean latency: ~11.6 ms over 50k vectors × 384 dims (M4)
-- Throughput: ~3.3 GFLOPs (~82% of single-core scalar peak)
-- Compute-bound, not memory-bound — SIMD in step 5 should give ~8–16× speedup
+Expected outcome of the benchmark (approximate, will vary ~10% run-to-run):
+
+| Kernel | Mean latency | GFLOPs | Speedup vs scalar |
+|---|---|---|---|
+| scalar (forced) | ~11.4 ms | ~3.3 | 1.00× |
+| autovec (compiler) | ~5.9 ms | ~6.6 | ~1.9× |
+| **neon (hand-written)** | **~1.0 ms** | **~38.6** | **~11.5×** |
 
 ## Status
 
@@ -111,7 +116,7 @@ Currently in **Phase 1** — building the C++ vector search engine.
 - [x] Step 1: Project scaffolding + FFI skeleton
 - [x] Step 2: Synthetic vector generator + ground truth
 - [x] Step 3: Scalar C++ dot product (correctness verified)
-- [x] Step 4: Benchmark harness — scalar baseline: 11.65 ms mean, 3.30 GFLOPs
-- [ ] Step 5: ARM Neon SIMD rewrite (target: break 2 ms)
+- [x] Step 4: Benchmark harness — scalar baseline: ~11.4 ms mean, 3.3 GFLOPs
+- [x] Step 5: ARM Neon SIMD — **~1.0 ms mean, 38.6 GFLOPs, 11.5× speedup** (now the production kernel)
 - [ ] Step 6: Top-k selection
 - [ ] Step 7: `.dylib` + ctypes end-to-end

@@ -1,5 +1,6 @@
-"""Verify the C++ scalar dot product matches the numpy ground truth.
+"""Verify the C++ FFI kernel matches the numpy ground truth.
 
+The FFI dispatches to whichever kernel is currently production (Neon as of step 5).
 Run after `make` and `python scripts/generate_synthetic.py`.
 """
 
