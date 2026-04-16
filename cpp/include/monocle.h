@@ -13,6 +13,18 @@ typedef struct MonocleIndex MonocleIndex;
 
 const char* monocle_version(void);
 
+// Compute dot product of `query` against each row of `vectors`.
+// `vectors` is n rows of `dim` float32 values each, row-major contiguous.
+// `query` is `dim` float32 values. `out_scores` is n float32 values (caller-allocated).
+// Returns 0 on success, nonzero on bad input.
+int monocle_dot_product_scores(
+    const float* vectors,
+    int n,
+    int dim,
+    const float* query,
+    float* out_scores
+);
+
 #ifdef __cplusplus
 }
 #endif
