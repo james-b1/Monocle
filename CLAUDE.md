@@ -35,7 +35,7 @@ Docs → Python Chunker → Embedding Model → .bin Vector Store
 
 ## Build Phases
 
-### Phase 1 — C++ Vector Engine (current)
+### Phase 1 — C++ Vector Engine (DONE)
 Goal: A `.dylib` Python can call to do fast cosine similarity search over a flat vector store.
 
 1. Data format: contiguous arrays of 384 `float32` values in a binary file
@@ -51,12 +51,22 @@ Teaching moments for Phase 1:
 - Memory layout: why contiguous `float[]` matters for cache (he knows this)
 - FFI basics: how Python `ctypes` loads a `.dylib` and passes pointers
 
-### Phase 2 — Python Ingestor
-1. File crawling (`pathlib`, handle PDF/markdown/Python)
-2. Text chunking (500-word chunks, 50-word overlap — explain why overlap)
-3. Embedding generation (`sentence-transformers`)
-4. Binary serialization (`numpy`)
+### Phase 2 — Python Ingestor (next)
+Goal: crawl a directory of docs, chunk them, embed them, and produce the binary format that Phase 1's `ffi.Index` already consumes.
+
+**Critical data format contract** (must match what `scripts/generate_synthetic.py` produces):
+- `vectors.bin`: N × 384 contiguous float32, row-major, no header, unit-normalized
+- `metadata.json`: chunk_id → {filename, char_offset, preview text}
+- `ffi.Index("vectors.bin", dim=384)` must load the output without changes
+
+Steps:
+1. File crawling (`pathlib`, handle PDF/markdown/Python files)
+2. Text chunking (500-word chunks, 50-word overlap — explain why overlap matters for retrieval)
+3. Embedding generation (`sentence-transformers`, model: `all-MiniLM-L6-v2`, 384-dim)
+4. Unit normalization + binary serialization (`numpy.tofile`)
 5. Metadata JSON sidecar: chunk_id → {filename, char_offset, preview}
+
+Dependencies to install: `pip install sentence-transformers` (into the existing `.venv`)
 
 ### Phase 3 — LangGraph Orchestrator
 1. State schema (TypedDict)
