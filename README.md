@@ -131,7 +131,9 @@ Benchmark (approximate, varies ~10% run-to-run):
 
 ## Status
 
-**Phase 1 complete.** Ready for Phase 2 (Python ingestor — crawl docs, chunk, embed, write vectors.bin).
+**Phase 1 complete.** Phase 2 in progress (Python ingestor — crawl docs, chunk, embed, write vectors.bin).
+
+### Phase 1 — C++ vector engine
 
 - [x] Step 1: Project scaffolding + FFI skeleton
 - [x] Step 2: Synthetic vector generator + ground truth
@@ -142,3 +144,21 @@ Benchmark (approximate, varies ~10% run-to-run):
 - [x] Step 7: Opaque `Index` handle, mmap-backed load, thread-safe concurrent search
 
 **Phase 1 headline:** 0.98 ms top-10 search over 50,000 × 384-dim vectors on M4, reproducible via `./build/bench`.
+
+### Phase 2 — Python ingestor
+
+- [x] Step 1: File crawler (`monocle.ingest.crawl`) — `.md`/`.txt`, skips hidden, sorted output
+- [ ] Step 2: Text chunker (500-word windows, 50-word overlap)
+- [ ] Step 3: Embedding generator (`sentence-transformers`, `all-MiniLM-L6-v2`)
+- [ ] Step 4: Normalize + serialize to `vectors.bin`
+- [ ] Step 5: `metadata.json` sidecar + `ingest` CLI entry point
+
+#### Trying the crawler standalone
+
+```bash
+PYTHONPATH=python .venv/bin/python -c "
+from monocle.ingest import crawl
+for path, text in crawl('.'):
+    print(f'{len(text):>6} chars  {path.name}')
+"
+```
