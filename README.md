@@ -148,17 +148,21 @@ Benchmark (approximate, varies ~10% run-to-run):
 ### Phase 2 — Python ingestor
 
 - [x] Step 1: File crawler (`monocle.ingest.crawl`) — `.md`/`.txt`, skips hidden, sorted output
-- [ ] Step 2: Text chunker (500-word windows, 50-word overlap)
-- [ ] Step 3: Embedding generator (`sentence-transformers`, `all-MiniLM-L6-v2`)
+- [x] Step 2: Text chunker (`monocle.ingest.chunk_text`) — 500-word windows, 50-word overlap, char offsets preserved
+- [x] Step 3: Embedding generator (`monocle.ingest.Embedder`) — `all-MiniLM-L6-v2`, 384-dim float32, MPS-accelerated on M4
 - [ ] Step 4: Normalize + serialize to `vectors.bin`
 - [ ] Step 5: `metadata.json` sidecar + `ingest` CLI entry point
 
-#### Trying the crawler standalone
+> **First-run note for Step 3:** the first `Embedder()` call downloads ~80 MB of model weights from HuggingFace and caches them at `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.
+
+#### Trying the full crawl → chunk → embed pipeline
 
 ```bash
 PYTHONPATH=python .venv/bin/python -c "
-from monocle.ingest import crawl
-for path, text in crawl('.'):
-    print(f'{len(text):>6} chars  {path.name}')
+from monocle.ingest import crawl, chunk_text, Embedder
+emb = Embedder()
+chunks = [c for _, t in crawl('.') for c in chunk_text(t)]
+vecs = emb.encode([c.text for c in chunks])
+print(f'{len(chunks)} chunks -> vectors {vecs.shape} {vecs.dtype} on {emb.model.device}')
 "
 ```
