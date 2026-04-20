@@ -129,9 +129,56 @@ Benchmark (approximate, varies ~10% run-to-run):
 | neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
 | **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
+## Running Phase 2 (complete)
+
+Ingest a directory of `.md` / `.txt` files into a Phase-1-loadable index:
+
+```bash
+# Default output: data/index/{vectors.bin, metadata.json}
+PYTHONPATH=python .venv/bin/python -m monocle.ingest <directory>
+
+# Knobs
+PYTHONPATH=python .venv/bin/python -m monocle.ingest <directory> \
+    --out data/index \
+    --model all-MiniLM-L6-v2 \
+    --chunk-size 500 \
+    --overlap 50 \
+    --batch-size 32 \
+    --no-progress
+```
+
+Search the resulting index, resolving chunk indices back to filenames:
+
+```python
+import json, numpy as np
+from monocle import ffi
+from monocle.ingest import Embedder
+
+meta = json.load(open("data/index/metadata.json"))
+emb = Embedder(model_name=meta["model"])
+
+q = emb.encode(["how does SIMD speed up cosine similarity?"])[0]
+q /= np.linalg.norm(q)
+
+with ffi.Index("data/index/vectors.bin", dim=meta["dim"]) as idx:
+    indices, scores = idx.search(q.astype(np.float32), k=5)
+
+for i, s in zip(indices, scores):
+    c = meta["chunks"][i]
+    print(f"[{s:.3f}] {c['filename']} @ char {c['char_offset']}")
+    print(f"        {c['preview']}")
+```
+
+The library API is also callable directly (Phase 4 will use this from the MCP server):
+
+```python
+from monocle.ingest import ingest
+ingest(root=".", out_dir="data/index")
+```
+
 ## Status
 
-**Phase 1 complete.** Phase 2 in progress (Python ingestor — crawl docs, chunk, embed, write vectors.bin).
+**Phases 1 and 2 complete.** Ready for Phase 3 (LangGraph orchestrator: query rewriting + result validation).
 
 ### Phase 1 — C++ vector engine
 
@@ -150,19 +197,9 @@ Benchmark (approximate, varies ~10% run-to-run):
 - [x] Step 1: File crawler (`monocle.ingest.crawl`) — `.md`/`.txt`, skips hidden, sorted output
 - [x] Step 2: Text chunker (`monocle.ingest.chunk_text`) — 500-word windows, 50-word overlap, char offsets preserved
 - [x] Step 3: Embedding generator (`monocle.ingest.Embedder`) — `all-MiniLM-L6-v2`, 384-dim float32, MPS-accelerated on M4
-- [ ] Step 4: Normalize + serialize to `vectors.bin`
-- [ ] Step 5: `metadata.json` sidecar + `ingest` CLI entry point
+- [x] Step 4: Serializer (`monocle.ingest.write_index`) — L2-normalize + atomic write; round-trips through `ffi.Index`
+- [x] Step 5: `metadata.json` sidecar + `ingest` CLI (`python -m monocle.ingest <dir>`)
 
-> **First-run note for Step 3:** the first `Embedder()` call downloads ~80 MB of model weights from HuggingFace and caches them at `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.
+**Phase 2 headline:** end-to-end natural-language search over local docs in one command. `python -m monocle.ingest .` crawls + chunks + embeds + serializes in ~6 seconds for the project's own docs; query results resolve to `(filename, char_offset, preview)` via `metadata.json`.
 
-#### Trying the full crawl → chunk → embed pipeline
-
-```bash
-PYTHONPATH=python .venv/bin/python -c "
-from monocle.ingest import crawl, chunk_text, Embedder
-emb = Embedder()
-chunks = [c for _, t in crawl('.') for c in chunk_text(t)]
-vecs = emb.encode([c.text for c in chunks])
-print(f'{len(chunks)} chunks -> vectors {vecs.shape} {vecs.dtype} on {emb.model.device}')
-"
-```
+> **First-run note:** the first `Embedder()` (or `python -m monocle.ingest`) call downloads ~80 MB of model weights from HuggingFace and caches them at `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.

@@ -3,8 +3,12 @@
 Wraps `sentence-transformers`. Default model is all-MiniLM-L6-v2 — 384-dim
 float32 output, which is the contract Phase 1's C++ engine consumes.
 
-Vectors are returned UNNORMALIZED. Step 4 owns unit normalization so that
-"every vector that hits disk is unit-length" lives in exactly one place.
+We pass `normalize_embeddings=False` to skip the library's *additional*
+normalization layer. Note: all-MiniLM-L6-v2's pooling layer already applies
+L2 normalization internally, so its output is already unit-length even
+without the extra layer. Other 384-dim models may not — `write_index()` in
+the serializer is the authoritative guarantee that what hits disk is
+unit-normalized.
 """
 
 from __future__ import annotations

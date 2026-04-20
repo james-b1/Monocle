@@ -5,9 +5,9 @@ build/
 *.o
 *.d
 
-# Data (vector stores generated locally)
-data/*.bin
-data/*.json
+# Data (vector stores generated locally — synthetic in data/, ingest outputs in data/index/)
+data/**/*.bin
+data/**/*.json
 
 # Python
 __pycache__/
