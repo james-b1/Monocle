@@ -178,7 +178,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1 and 2 complete; Phase 3 in progress.** Step 1 done — agent state schema (`monocle.agent.state`).
+**Phases 1 and 2 complete; Phase 3 in progress.** Steps 1–3 done — state schema, query rewriter, and search node (rewrite → search runnable end-to-end).
 
 ### Phase 1 — C++ vector engine
 
@@ -207,7 +207,49 @@ ingest(root=".", out_dir="data/index")
 ### Phase 3 — LangGraph orchestrator (in progress)
 
 - [x] Step 1: Agent state schema (`monocle.agent.state`) — `AgentState` TypedDict + `SearchResult` frozen dataclass
-- [ ] Step 2: Query rewriter node (Ollama, `llama3.2:3b`)
-- [ ] Step 3: Search node (wraps Phase 1 `ffi.Index` + resolves `metadata.json`)
+- [x] Step 2: Query rewriter node (`monocle.agent.nodes.make_rewrite_query`) — Ollama / `llama3.2:3b`, ~150–200 ms warm
+- [x] Step 3: Search node (`make_search_node`) + `open_index` ctx manager — embeds query, calls Phase 1, resolves chunk_ids via `metadata.json`
 - [ ] Step 4: Result validator node (Ollama JSON mode)
 - [ ] Step 5: Wire the graph + conditional fallback edges
+
+#### Phase 3 prerequisites
+
+- **Ollama daemon running** (defaults to `http://localhost:11434`). Install: <https://ollama.com/download>
+- **Pull the model**: `ollama pull llama3.2:3b` (~2 GB)
+- **Python client**: included in `requirements.txt` (`ollama==0.6.1`)
+
+> **First-call note:** the first chat completion after the daemon starts pays ~5–10 s to load model weights into RAM. Subsequent calls on the same model are ~150–200 ms on M4.
+
+#### Try the rewriter
+
+```python
+from monocle.agent import OllamaClient, make_rewrite_query
+
+rewrite = make_rewrite_query(OllamaClient())  # defaults to llama3.2:3b
+print(rewrite({"question": "can you please find me info on FFTs"}))
+# {'rewritten_query': 'Fast Fourier Transform algorithm documentation', 'attempt': 1}
+```
+
+#### Try rewrite + search end-to-end
+
+Requires a Phase 2 index (e.g., `python -m monocle.ingest .` produces `data/index/`).
+
+```python
+from monocle.agent import OllamaClient, make_rewrite_query, make_search_node, open_index
+from monocle.ingest.embedder import Embedder
+
+with open_index("data/index") as (index, meta):
+    embedder = Embedder(model_name=meta["model"])     # must match metadata['model']
+    rewrite  = make_rewrite_query(OllamaClient())
+    search   = make_search_node(embedder, index, meta, k=5)
+
+    state = {"question": "how does the c++ engine make searches faster?"}
+    state |= rewrite(state)
+    state |= search(state)
+
+    print(state["rewritten_query"])
+    for r in state["results"]:
+        print(f"[{r.score:.3f}] {r.filename} @ {r.char_offset}  {r.preview[:60]}")
+```
+
+`make_search_node` validates that the embedder's model matches `metadata['model']` at construction time — a mismatch silently returns garbage (vectors live in different latent spaces), so we fail fast.
