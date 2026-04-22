@@ -5,6 +5,7 @@ from monocle.agent.nodes import (
     DEFAULT_TOP_K,
     make_rewrite_query,
     make_search_node,
+    make_validate_results,
     open_index,
 )
 from monocle.agent.state import AgentState, SearchResult
@@ -17,5 +18,6 @@ __all__ = [
     "DEFAULT_TOP_K",
     "make_rewrite_query",
     "make_search_node",
+    "make_validate_results",
     "open_index",
 ]

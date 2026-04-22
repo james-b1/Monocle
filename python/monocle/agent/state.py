@@ -14,6 +14,7 @@ class SearchResult:
     score: float
     filename: str
     char_offset: int
+    char_length: int
     preview: str
 
 

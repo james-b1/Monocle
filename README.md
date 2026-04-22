@@ -178,7 +178,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1 and 2 complete; Phase 3 in progress.** Steps 1–3 done — state schema, query rewriter, and search node (rewrite → search runnable end-to-end).
+**Phases 1 and 2 complete; Phase 3 in progress.** Steps 1–4 done — state schema, query rewriter, search node, and Ollama JSON-mode validator. Only graph wiring (Step 5) remains.
 
 ### Phase 1 — C++ vector engine
 
@@ -209,7 +209,7 @@ ingest(root=".", out_dir="data/index")
 - [x] Step 1: Agent state schema (`monocle.agent.state`) — `AgentState` TypedDict + `SearchResult` frozen dataclass
 - [x] Step 2: Query rewriter node (`monocle.agent.nodes.make_rewrite_query`) — Ollama / `llama3.2:3b`, ~150–200 ms warm
 - [x] Step 3: Search node (`make_search_node`) + `open_index` ctx manager — embeds query, calls Phase 1, resolves chunk_ids via `metadata.json`
-- [ ] Step 4: Result validator node (Ollama JSON mode)
+- [x] Step 4: Result validator node (`make_validate_results`) — Ollama JSON-mode (`format=<JSON Schema>`); optionally loads full chunk text from disk via `corpus_root` for richer judgment
 - [ ] Step 5: Wire the graph + conditional fallback edges
 
 #### Phase 3 prerequisites
@@ -253,3 +253,28 @@ with open_index("data/index") as (index, meta):
 ```
 
 `make_search_node` validates that the embedder's model matches `metadata['model']` at construction time — a mismatch silently returns garbage (vectors live in different latent spaces), so we fail fast.
+
+#### Add the validator (rewrite → search → validate)
+
+```python
+from monocle.agent import (
+    OllamaClient, make_rewrite_query, make_search_node,
+    make_validate_results, open_index,
+)
+from monocle.ingest.embedder import Embedder
+
+with open_index("data/index") as (index, meta):
+    embedder = Embedder(model_name=meta["model"])
+    llm      = OllamaClient()
+    rewrite  = make_rewrite_query(llm)
+    search   = make_search_node(embedder, index, meta, k=5)
+    validate = make_validate_results(llm, corpus_root=".")  # loads full chunks for judgment
+
+    state = {"question": "how does the engine use SIMD to speed up search?"}
+    state |= rewrite(state)
+    state |= search(state)
+    state |= validate(state)
+    print(state["is_relevant"], "—", state["reason"])
+```
+
+Pass `corpus_root` so the validator reads each chunk's full text (via `char_offset` + `char_length`) instead of just the 160-char preview. Without it, the validator can produce false negatives when relevant content sits mid-chunk; with it, the validator pays ~2× more latency (more input tokens) for sharper judgment.
