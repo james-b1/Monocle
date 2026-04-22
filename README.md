@@ -178,7 +178,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1 and 2 complete.** Ready for Phase 3 (LangGraph orchestrator: query rewriting + result validation).
+**Phases 1 and 2 complete; Phase 3 in progress.** Step 1 done — agent state schema (`monocle.agent.state`).
 
 ### Phase 1 — C++ vector engine
 
@@ -203,3 +203,11 @@ ingest(root=".", out_dir="data/index")
 **Phase 2 headline:** end-to-end natural-language search over local docs in one command. `python -m monocle.ingest .` crawls + chunks + embeds + serializes in ~6 seconds for the project's own docs; query results resolve to `(filename, char_offset, preview)` via `metadata.json`.
 
 > **First-run note:** the first `Embedder()` (or `python -m monocle.ingest`) call downloads ~80 MB of model weights from HuggingFace and caches them at `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.
+
+### Phase 3 — LangGraph orchestrator (in progress)
+
+- [x] Step 1: Agent state schema (`monocle.agent.state`) — `AgentState` TypedDict + `SearchResult` frozen dataclass
+- [ ] Step 2: Query rewriter node (Ollama, `llama3.2:3b`)
+- [ ] Step 3: Search node (wraps Phase 1 `ffi.Index` + resolves `metadata.json`)
+- [ ] Step 4: Result validator node (Ollama JSON mode)
+- [ ] Step 5: Wire the graph + conditional fallback edges
