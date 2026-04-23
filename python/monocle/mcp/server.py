@@ -1,23 +1,37 @@
 """Monocle MCP server.
 
-Phase 4 Step 2: defines the `search_knowledge_base` tool *contract* (input
-schema, output schema, description) with a stub handler. Step 3 will replace
-the stub with a call into the Phase 3 LangGraph agent.
+Phase 4 Step 3: the `search_knowledge_base` tool now calls into the Phase 3
+LangGraph agent. The agent is constructed once at server startup via FastMCP's
+`lifespan` API and held for the server's lifetime. Per-call `graph.invoke` is
+synchronous + blocking (Ollama HTTP, embedder forward pass, mmap I/O), so we
+bridge it onto a worker thread with `asyncio.to_thread`.
 
-`ping` stays as a cheap liveness check — no model load, no index access.
+Use the factory `build_server(index_dir, ...)` to construct an instance. The
+CLI in `__main__.py` does this from argparse.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from typing import Annotated
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
+
+from monocle.agent.graph import DEFAULT_MAX_ATTEMPTS, open_agent
+from monocle.agent.state import SearchResult
 
 log = logging.getLogger("monocle.mcp")
 
-mcp = FastMCP("monocle")
+# Build the graph with the schema's max k so any per-call k is satisfiable
+# without rebuilding. Tool handler slices to the requested k.
+GRAPH_TOP_K = 20
 
 
 class SearchHit(BaseModel):
@@ -46,48 +60,124 @@ class SearchResponse(BaseModel):
     results: list[SearchHit] = Field(description="Top-k matching chunks, ranked by descending similarity.")
 
 
-@mcp.tool()
-def ping(message: str = "hello") -> str:
-    """Return a greeting. Cheap liveness check — touches no model or index."""
-    log.info("ping tool called with message=%r", message)
-    return f"pong: {message}"
+@dataclass
+class AppContext:
+    """Shared state held for the server's lifetime."""
+
+    graph: Any  # compiled langgraph.StateGraph; kept Any to avoid leaking langgraph types
 
 
-@mcp.tool()
-def search_knowledge_base(
-    query: Annotated[
-        str,
-        Field(description="Natural-language question about the user's local documents."),
-    ],
-    k: Annotated[
-        int,
-        Field(
-            ge=1,
-            le=20,
-            description="Number of top-matching chunks to return. Default 5; capped at 20.",
-        ),
-    ] = 5,
-) -> SearchResponse:
-    """Search the user's local document corpus for chunks relevant to a question.
+def _hit_from_result(r: SearchResult) -> SearchHit:
+    return SearchHit(
+        filename=r.filename,
+        score=r.score,
+        char_offset=r.char_offset,
+        char_length=r.char_length,
+        preview=r.preview,
+    )
 
-    Routes the query through a local retrieval pipeline (LLM rewrite → vector
-    similarity search → LLM relevance check, with one bounded retry on miss).
-    Returns the top-k matching chunks with file paths, scores, and previews,
-    plus an advisory `is_relevant` verdict from the validator.
 
-    Use this when the user asks about content likely to live in their own
-    notes, source code, or documents that have been ingested into Monocle —
-    e.g., "what did I write about JK flip-flops?", "find the part of the
-    engine that does SIMD". Do NOT use for general world knowledge or
-    information not specific to the user's local files.
-    """
-    log.info("search_knowledge_base called: query=%r k=%d", query, k)
-    # Step 2 stub — Step 3 will call into monocle.agent.graph.open_agent here.
+def _final_state_to_response(final: dict, query: str, k: int) -> SearchResponse:
+    """Adapt a Phase 3 final-state dict into the tool's SearchResponse contract."""
+    raw = final.get("results") or []
+    sliced = raw[:k]
     return SearchResponse(
         query=query,
-        rewritten_query=query,
-        is_relevant=False,
-        reason="Phase 4 Step 2 stub — handler not yet wired to the Phase 3 agent.",
-        attempts=0,
-        results=[],
+        rewritten_query=str(final.get("rewritten_query") or query),
+        is_relevant=bool(final.get("is_relevant", False)),
+        reason=str(final.get("reason", "")),
+        attempts=int(final.get("attempt", 0)),
+        results=[_hit_from_result(r) for r in sliced],
     )
+
+
+def build_server(
+    index_dir: str | Path,
+    *,
+    corpus_root: str | Path | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+) -> FastMCP:
+    """Construct the Monocle MCP server bound to a specific index + corpus.
+
+    The Phase 3 agent is opened in the lifespan so it's ready before the first
+    tool call and torn down on shutdown. Heavy startup work (model load, mmap)
+    runs off-thread so the asyncio loop stays responsive during init.
+    """
+
+    @asynccontextmanager
+    async def lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
+        # Peek metadata to clamp graph_k against tiny indices — Phase 1's
+        # ffi.Index.search asserts k <= n_vectors, so passing k=20 to a
+        # 9-chunk index would crash inside the search node.
+        meta_path = Path(index_dir) / "metadata.json"
+        n_chunks = len(json.loads(meta_path.read_text())["chunks"])
+        graph_k = min(GRAPH_TOP_K, n_chunks)
+        log.info(
+            "opening agent: index=%s corpus_root=%s n_chunks=%d graph_k=%d",
+            index_dir, corpus_root, n_chunks, graph_k,
+        )
+        cm = open_agent(
+            index_dir,
+            corpus_root=corpus_root,
+            k=graph_k,
+            max_attempts=max_attempts,
+        )
+        # open_agent is a sync ctx manager that loads the embedder (~100MB of
+        # torch weights) and mmaps the index. Both are blocking — keep them
+        # off the event loop.
+        graph = await asyncio.to_thread(cm.__enter__)
+        log.info("agent ready (max_attempts=%d)", max_attempts)
+        try:
+            yield AppContext(graph=graph)
+        finally:
+            log.info("shutting down agent")
+            await asyncio.to_thread(cm.__exit__, None, None, None)
+
+    mcp = FastMCP("monocle", lifespan=lifespan)
+
+    @mcp.tool()
+    def ping(message: str = "hello") -> str:
+        """Return a greeting. Cheap liveness check — touches no model or index."""
+        log.info("ping: %r", message)
+        return f"pong: {message}"
+
+    @mcp.tool()
+    async def search_knowledge_base(
+        query: Annotated[
+            str,
+            Field(description="Natural-language question about the user's local documents."),
+        ],
+        ctx: Context,
+        k: Annotated[
+            int,
+            Field(
+                ge=1,
+                le=GRAPH_TOP_K,
+                description=f"Number of top-matching chunks to return. Default 5; capped at {GRAPH_TOP_K}.",
+            ),
+        ] = 5,
+    ) -> SearchResponse:
+        """Search the user's local document corpus for chunks relevant to a question.
+
+        Routes the query through a local retrieval pipeline (LLM rewrite → vector
+        similarity search → LLM relevance check, with one bounded retry on miss).
+        Returns the top-k matching chunks with file paths, scores, and previews,
+        plus an advisory `is_relevant` verdict from the validator.
+
+        Use this when the user asks about content likely to live in their own
+        notes, source code, or documents that have been ingested into Monocle —
+        e.g., "what did I write about JK flip-flops?", "find the part of the
+        engine that does SIMD". Do NOT use for general world knowledge or
+        information not specific to the user's local files.
+        """
+        state: AppContext = ctx.request_context.lifespan_context
+        log.info("search: query=%r k=%d", query, k)
+        # graph.invoke is synchronous + blocking (ollama HTTP, embedder, mmap I/O).
+        final = await asyncio.to_thread(state.graph.invoke, {"question": query})
+        log.info(
+            "search done: relevant=%s attempts=%s results=%d",
+            final.get("is_relevant"), final.get("attempt"), len(final.get("results") or []),
+        )
+        return _final_state_to_response(final, query, k)
+
+    return mcp

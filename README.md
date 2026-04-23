@@ -131,30 +131,39 @@ Benchmark (approximate, varies ~10% run-to-run):
 
 ## Running Phase 4 (in progress)
 
-The MCP server exposes Monocle's pipeline as a tool Claude Code can call natively. Two tools are registered today:
+The MCP server exposes Monocle's pipeline as a tool Claude Code can call natively. Two tools are registered:
 
 - `ping(message="hello") -> str` — cheap liveness check, touches no model or index.
-- `search_knowledge_base(query, k=5) -> SearchResponse` — schema is final; handler is a Step 2 stub that returns `is_relevant=False` + `results=[]` until Step 3 wires it to the Phase 3 agent.
+- `search_knowledge_base(query, k=5) -> SearchResponse` — runs the Phase 3 agent: `rewrite → search → validate → (retry | END)`. Returns top-k chunks plus the validator's relevance verdict.
 
 `SearchResponse` (the contract Claude sees) is `{query, rewritten_query, is_relevant, reason, attempts, results: [{filename, score, char_offset, char_length, preview}]}`. `is_relevant` is **advisory** — chunks are returned regardless of the validator's verdict, because the validator can be wrong and Claude has more conversational context to judge with.
+
+The agent is constructed **once at server startup** via FastMCP's lifespan (loads ~100 MB of embedder weights + mmaps the index) and held for the server's lifetime. The graph's internal `k` is clamped to `min(20, n_chunks)` so per-call `k` requests never overshoot a small index.
+
+Prereqs: a Phase-2-built index (`python -m monocle.ingest <dir>`), Ollama running with `llama3.2:3b` pulled (same as Phase 3).
 
 Run the server directly (reads JSON-RPC on stdin, writes on stdout — logs go to stderr):
 
 ```bash
-PYTHONPATH=python .venv/bin/python -m monocle.mcp
+PYTHONPATH=python .venv/bin/python -m monocle.mcp \
+    --index data/index \
+    --root  .              \
+    --max-attempts 2
 ```
 
-Register it with Claude Code so you can call `ping` from any session:
+Register it with Claude Code so you can call `search_knowledge_base` from any session:
 
 ```bash
 # adjust the absolute paths to this repo
 claude mcp add monocle \
     --env PYTHONPATH=/absolute/path/to/Monocle/python \
-    -- /absolute/path/to/Monocle/.venv/bin/python -m monocle.mcp
+    -- /absolute/path/to/Monocle/.venv/bin/python -m monocle.mcp \
+       --index /absolute/path/to/Monocle/data/index \
+       --root  /absolute/path/to/Monocle
 
 # then in a new Claude Code session:
 #   /mcp       → should list "monocle" as connected
-#   ask Claude: "use the monocle ping tool with message='hi'"
+#   ask Claude: "search my knowledge base for 'what is Monocle?'"
 #
 # clean up later:
 #   claude mcp remove monocle
@@ -166,7 +175,7 @@ Protocol-level smoke test (no Claude Code required) — pipe an MCP handshake + 
 PYTHONPATH=python .venv/bin/python -c '
 import json, subprocess, os
 env = os.environ | {"PYTHONPATH": "python"}
-p = subprocess.Popen([".venv/bin/python","-m","monocle.mcp"],
+p = subprocess.Popen([".venv/bin/python","-m","monocle.mcp","--index","data/index","--root","."],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     text=True, env=env)
 def send(m): p.stdin.write(json.dumps(m)+"\n"); p.stdin.flush()
@@ -174,11 +183,11 @@ def recv(): return json.loads(p.stdout.readline())
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}); print(recv())
 send({"jsonrpc":"2.0","method":"notifications/initialized"})
 send({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{"message":"hi"}}}); print(recv())
-send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_knowledge_base","arguments":{"query":"how does SIMD work?","k":3}}}); print(recv())
+send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_knowledge_base","arguments":{"query":"What is Monocle?","k":2}}}); print(recv())
 p.terminate()'
 ```
 
-Expected: `{"result": {..., "serverInfo": {"name": "monocle", ...}}}` then a tool call response containing `"pong: hi"`.
+Expected: an `initialize` response with `serverInfo.name == "monocle"`, then `pong: hi`, then a `SearchResponse` with `is_relevant=true`, `attempts=1`, and chunks from `README.md`.
 
 ## Running Phase 3 (complete)
 
@@ -278,7 +287,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP server up (Steps 1–2 of 5); `monocle` exposes a `ping` liveness check and a `search_knowledge_base` tool whose schema is finalized but whose handler is still a stub (Step 3 wires it to the Phase 3 agent).
+**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP server up (Steps 1–3 of 5); `monocle` exposes `search_knowledge_base` and `ping`. The handler now runs the real Phase 3 LangGraph agent: graph constructed once at server startup via FastMCP lifespan, per-call `graph.invoke` bridged onto a worker thread with `asyncio.to_thread`.
 
 ### Phase 1 — C++ vector engine
 
@@ -385,6 +394,6 @@ Pass `corpus_root` so the validator reads each chunk's full text (via `char_offs
 
 - [x] Step 1: Package scaffolding (`monocle.mcp`) — FastMCP server + `ping` smoke-test tool; stdio handshake verified with a real MCP client frame sequence
 - [x] Step 2: `search_knowledge_base` tool schema — Pydantic `SearchResponse`/`SearchHit` models; `Annotated[T, Field(...)]` parameter descriptions; `k` bounded `[1, 20]` at the schema level; stub handler returns realistic shape
-- [ ] Step 3: Wire the handler to Phase 3's `open_agent` (construct once, call via `asyncio.to_thread`)
-- [ ] Step 4: Error handling + stderr logging + graceful Ollama-down failure
+- [x] Step 3: Handler wired to Phase 3 — `build_server(index_dir, ...)` factory; FastMCP lifespan owns the agent; `asyncio.to_thread` bridges sync `graph.invoke` onto an async tool handler; CLI gains `--index`/`--root`/`--max-attempts`; graph_k clamped to `min(20, n_chunks)`
+- [ ] Step 4: Error handling + graceful Ollama-down failure
 - [ ] Step 5: Register in Claude Code config and run an end-to-end smoke test
