@@ -129,6 +129,55 @@ Benchmark (approximate, varies ~10% run-to-run):
 | neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
 | **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
+## Running Phase 3 (complete)
+
+Phase 3 wires Phases 1 + 2 together under an Ollama-driven state machine:
+
+```
+START -> rewrite -> search -> validate -> (relevant ? END : retry up to MAX_ATTEMPTS)
+```
+
+Prereqs: Ollama daemon running + `ollama pull llama3.2:3b` + a Phase-2-built index (`python -m monocle.ingest <dir>`). See `Phase 3 prerequisites` below for details.
+
+### CLI
+
+```bash
+PYTHONPATH=python .venv/bin/python -m monocle.agent "how does the engine use SIMD?"
+
+# Knobs
+PYTHONPATH=python .venv/bin/python -m monocle.agent "<question>" \
+    --index data/index \
+    --root  .                \
+    -k 5                     \
+    --max-attempts 2
+```
+
+Exits 0 if the validator judged results relevant, 1 otherwise — suitable for scripting.
+
+### Library
+
+```python
+from monocle.agent.graph import open_agent
+
+with open_agent("data/index", corpus_root=".") as graph:
+    # one-shot:
+    final = graph.invoke({"question": "what does ARM Neon do in Phase 1?"})
+    print(final["is_relevant"], final["reason"])
+    for r in final["results"]:
+        print(f"[{r.score:.3f}] {r.filename}")
+
+    # streaming per-node updates (great for tracing):
+    for update in graph.stream({"question": "..."}, stream_mode="updates"):
+        for node, delta in update.items():
+            print(node, delta)
+```
+
+`open_agent` is a context manager that owns the index + embedder + LLM client for you. The underlying `build_graph(llm, embedder, index, metadata)` is exposed if you want to wire things manually.
+
+### How retry actually works
+
+On `attempt == 0`, `rewrite` uses the standard prompt at temperature 0.0 (deterministic). If the validator rejects the results, the graph loops back to `rewrite` — but now `state['attempt']` is 1, so the node switches to a **retry-specific system prompt** that includes the previous (failed) rewrite and the validator's failure `reason`, at temperature 0.5. Without this, retry would be pointless (same input → same rewrite → same chunks → same verdict). With it, the second attempt explores genuinely different vocabulary. After `MAX_ATTEMPTS` unsuccessful passes the graph exits honestly with `is_relevant=False`.
+
 ## Running Phase 2 (complete)
 
 Ingest a directory of `.md` / `.txt` files into a Phase-1-loadable index:
@@ -178,7 +227,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1 and 2 complete; Phase 3 in progress.** Steps 1–4 done — state schema, query rewriter, search node, and Ollama JSON-mode validator. Only graph wiring (Step 5) remains.
+**Phases 1, 2, and 3 complete.** Ready for Phase 4 (MCP server: expose as a Claude Code tool).
 
 ### Phase 1 — C++ vector engine
 
@@ -204,13 +253,15 @@ ingest(root=".", out_dir="data/index")
 
 > **First-run note:** the first `Embedder()` (or `python -m monocle.ingest`) call downloads ~80 MB of model weights from HuggingFace and caches them at `~/.cache/huggingface/hub/`. Subsequent runs are fully offline.
 
-### Phase 3 — LangGraph orchestrator (in progress)
+### Phase 3 — LangGraph orchestrator
 
 - [x] Step 1: Agent state schema (`monocle.agent.state`) — `AgentState` TypedDict + `SearchResult` frozen dataclass
-- [x] Step 2: Query rewriter node (`monocle.agent.nodes.make_rewrite_query`) — Ollama / `llama3.2:3b`, ~150–200 ms warm
+- [x] Step 2: Query rewriter node (`monocle.agent.nodes.make_rewrite_query`) — Ollama / `llama3.2:3b`; retry-aware (different prompt + higher temp on attempt > 0)
 - [x] Step 3: Search node (`make_search_node`) + `open_index` ctx manager — embeds query, calls Phase 1, resolves chunk_ids via `metadata.json`
 - [x] Step 4: Result validator node (`make_validate_results`) — Ollama JSON-mode (`format=<JSON Schema>`); optionally loads full chunk text from disk via `corpus_root` for richer judgment
-- [ ] Step 5: Wire the graph + conditional fallback edges
+- [x] Step 5: Graph wiring (`monocle.agent.graph.build_graph`, `open_agent`) + CLI (`python -m monocle.agent`) — `StateGraph` with conditional retry edge bounded by `MAX_ATTEMPTS`
+
+**Phase 3 headline:** `python -m monocle.agent "how does the engine use SIMD?"` runs the full `rewrite → search → validate → (retry | END)` loop. Happy-path queries return in ~5 s (one pass, dominated by ~3 Ollama calls × ~1.5 s warm); impossible queries bail after two attempts with `is_relevant=False` + the validator's reason, rather than confidently returning garbage.
 
 #### Phase 3 prerequisites
 

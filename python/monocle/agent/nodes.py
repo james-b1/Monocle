@@ -30,6 +30,14 @@ Q: how does the FFT algorithm work?
 A: Fast Fourier Transform algorithm explanation"""
 
 
+REWRITE_RETRY_SYSTEM = """A previous rewrite of the user's question did NOT retrieve relevant documents. Produce a DIFFERENT rewrite that explores other vocabulary or framing.
+
+Rules:
+- Use different keywords than the previous attempt.
+- Consider broadening, narrowing, or using domain-specific terminology the previous attempt missed.
+- Output ONLY the rewritten query as a single line. No preamble, no quotes, no explanation."""
+
+
 VALIDATE_SYSTEM = """You judge whether a set of document excerpts plausibly contains the answer to a user's question.
 
 You are NOT answering the question. You are only judging relevance.
@@ -53,15 +61,29 @@ VALIDATE_SCHEMA: dict[str, Any] = {
 
 
 def make_rewrite_query(llm: OllamaClient) -> Callable[[AgentState], dict[str, Any]]:
-    """LangGraph node factory: rewrites state['question'] -> {'rewritten_query', 'attempt'}."""
+    """LangGraph node factory: rewrites state['question'] -> {'rewritten_query', 'attempt'}.
+
+    On retry (attempt > 0), uses a different prompt + higher temperature that incorporates
+    the previous rewrite and the validator's failure reason, to break the deterministic loop.
+    """
 
     def rewrite_query(state: AgentState) -> dict[str, Any]:
-        raw = llm.complete(
-            state["question"],
-            system=REWRITE_SYSTEM,
-            temperature=0.0,
-            max_tokens=128,
-        )
+        attempt = state.get("attempt", 0)
+        if attempt == 0:
+            prompt = state["question"]
+            system = REWRITE_SYSTEM
+            temperature = 0.0
+        else:
+            prompt = (
+                f"Original question: {state['question']}\n"
+                f"Previous rewrite (failed): {state.get('rewritten_query', '')}\n"
+                f"Failure reason: {state.get('reason', 'unknown')}\n\n"
+                f"Provide a different rewrite."
+            )
+            system = REWRITE_RETRY_SYSTEM
+            temperature = 0.5
+
+        raw = llm.complete(prompt, system=system, temperature=temperature, max_tokens=128)
         first_line = raw.splitlines()[0].strip() if raw else ""
         # small models occasionally prepend "A:" / "Answer:" or wrap in quotes
         if first_line.lower().startswith(("a:", "answer:")):
@@ -69,7 +91,7 @@ def make_rewrite_query(llm: OllamaClient) -> Callable[[AgentState], dict[str, An
         rewritten = first_line.strip("\"'`").strip()
         return {
             "rewritten_query": rewritten or state["question"],
-            "attempt": state.get("attempt", 0) + 1,
+            "attempt": attempt + 1,
         }
 
     return rewrite_query
