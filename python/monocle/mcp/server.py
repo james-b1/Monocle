@@ -91,6 +91,46 @@ def _final_state_to_response(final: dict, query: str, k: int) -> SearchResponse:
     )
 
 
+def _failure_response(query: str, reason: str) -> SearchResponse:
+    """Operational failure → in-shape SearchResponse with empty results + reason."""
+    # Keep reason bounded so a 10kb traceback doesn't bloat the tool result.
+    return SearchResponse(
+        query=query,
+        rewritten_query=query,
+        is_relevant=False,
+        reason=reason[:500],
+        attempts=0,
+        results=[],
+    )
+
+
+def _preflight_index(index_dir: Path) -> int:
+    """Validate the index dir before the lifespan even starts. Returns n_chunks."""
+    if not index_dir.is_dir():
+        raise FileNotFoundError(
+            f"Index directory not found: {index_dir}. "
+            f"Run `python -m monocle.ingest <corpus>` to build one."
+        )
+    meta_path = index_dir / "metadata.json"
+    vectors_path = index_dir / "vectors.bin"
+    for p in (meta_path, vectors_path):
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"Required file missing: {p}. Re-run `python -m monocle.ingest <corpus>`."
+            )
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"metadata.json at {meta_path} is malformed: {e}") from e
+    n_chunks = len(meta.get("chunks") or [])
+    if n_chunks == 0:
+        raise ValueError(
+            f"Index at {index_dir} contains 0 chunks — nothing to search. "
+            f"Re-run Phase 2 ingest against a non-empty corpus."
+        )
+    return n_chunks
+
+
 def build_server(
     index_dir: str | Path,
     *,
@@ -99,25 +139,23 @@ def build_server(
 ) -> FastMCP:
     """Construct the Monocle MCP server bound to a specific index + corpus.
 
+    Pre-flights the index synchronously (fail-fast on missing/empty index).
     The Phase 3 agent is opened in the lifespan so it's ready before the first
     tool call and torn down on shutdown. Heavy startup work (model load, mmap)
     runs off-thread so the asyncio loop stays responsive during init.
     """
+    index_path = Path(index_dir)
+    n_chunks = _preflight_index(index_path)
+    graph_k = min(GRAPH_TOP_K, n_chunks)
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
-        # Peek metadata to clamp graph_k against tiny indices — Phase 1's
-        # ffi.Index.search asserts k <= n_vectors, so passing k=20 to a
-        # 9-chunk index would crash inside the search node.
-        meta_path = Path(index_dir) / "metadata.json"
-        n_chunks = len(json.loads(meta_path.read_text())["chunks"])
-        graph_k = min(GRAPH_TOP_K, n_chunks)
         log.info(
             "opening agent: index=%s corpus_root=%s n_chunks=%d graph_k=%d",
-            index_dir, corpus_root, n_chunks, graph_k,
+            index_path, corpus_root, n_chunks, graph_k,
         )
         cm = open_agent(
-            index_dir,
+            index_path,
             corpus_root=corpus_root,
             k=graph_k,
             max_attempts=max_attempts,
@@ -173,7 +211,20 @@ def build_server(
         state: AppContext = ctx.request_context.lifespan_context
         log.info("search: query=%r k=%d", query, k)
         # graph.invoke is synchronous + blocking (ollama HTTP, embedder, mmap I/O).
-        final = await asyncio.to_thread(state.graph.invoke, {"question": query})
+        try:
+            final = await asyncio.to_thread(state.graph.invoke, {"question": query})
+        except ConnectionError as e:
+            # ollama-py wraps daemon-unreachable as a builtin ConnectionError
+            # with a user-friendly message — pass it through verbatim.
+            log.warning("ollama unreachable: %s", e)
+            return _failure_response(query, f"Ollama unreachable: {e}")
+        except Exception as e:
+            # Last-resort guard: never let an exception escape with no message
+            # (Step 3's empty-isError trap). Log the full traceback to stderr
+            # so we can debug, but keep the tool response in-shape for Claude.
+            log.exception("search failed unexpectedly")
+            msg = str(e) or repr(e)
+            return _failure_response(query, f"search failed: {type(e).__name__}: {msg}")
         log.info(
             "search done: relevant=%s attempts=%s results=%d",
             final.get("is_relevant"), final.get("attempt"), len(final.get("results") or []),

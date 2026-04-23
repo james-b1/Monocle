@@ -140,6 +140,11 @@ The MCP server exposes Monocle's pipeline as a tool Claude Code can call nativel
 
 The agent is constructed **once at server startup** via FastMCP's lifespan (loads ~100 MB of embedder weights + mmaps the index) and held for the server's lifetime. The graph's internal `k` is clamped to `min(20, n_chunks)` so per-call `k` requests never overshoot a small index.
 
+**Failure modes:**
+
+- **Startup**: `build_server` pre-flights the index synchronously. Missing directory, missing `metadata.json`/`vectors.bin`, or 0 chunks → the server refuses to start and prints an actionable message to stderr (e.g., `"Required file missing: data/index/metadata.json. Re-run python -m monocle.ingest <corpus>."`). MCP client sees the disconnect.
+- **Per-call**: `search_knowledge_base` always returns a well-formed `SearchResponse`. If Ollama is down, `is_relevant=false`, `results=[]`, `reason` carries Ollama's "please check that Ollama is downloaded, running and accessible" message verbatim. The `ping` tool keeps working — it has no Ollama dependency, so partial outages don't black-hole the whole server.
+
 Prereqs: a Phase-2-built index (`python -m monocle.ingest <dir>`), Ollama running with `llama3.2:3b` pulled (same as Phase 3).
 
 Run the server directly (reads JSON-RPC on stdin, writes on stdout — logs go to stderr):
@@ -287,7 +292,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP server up (Steps 1–3 of 5); `monocle` exposes `search_knowledge_base` and `ping`. The handler now runs the real Phase 3 LangGraph agent: graph constructed once at server startup via FastMCP lifespan, per-call `graph.invoke` bridged onto a worker thread with `asyncio.to_thread`.
+**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP server up (Steps 1–4 of 5); `monocle` exposes `search_knowledge_base` and `ping`, runs the real Phase 3 agent under a FastMCP lifespan, and degrades gracefully: bad index paths fail loudly at startup with actionable messages; per-call failures (Ollama down, etc.) return a well-formed `SearchResponse` with `is_relevant=false` and a useful `reason`.
 
 ### Phase 1 — C++ vector engine
 
@@ -395,5 +400,5 @@ Pass `corpus_root` so the validator reads each chunk's full text (via `char_offs
 - [x] Step 1: Package scaffolding (`monocle.mcp`) — FastMCP server + `ping` smoke-test tool; stdio handshake verified with a real MCP client frame sequence
 - [x] Step 2: `search_knowledge_base` tool schema — Pydantic `SearchResponse`/`SearchHit` models; `Annotated[T, Field(...)]` parameter descriptions; `k` bounded `[1, 20]` at the schema level; stub handler returns realistic shape
 - [x] Step 3: Handler wired to Phase 3 — `build_server(index_dir, ...)` factory; FastMCP lifespan owns the agent; `asyncio.to_thread` bridges sync `graph.invoke` onto an async tool handler; CLI gains `--index`/`--root`/`--max-attempts`; graph_k clamped to `min(20, n_chunks)`
-- [ ] Step 4: Error handling + graceful Ollama-down failure
+- [x] Step 4: Error handling — `_preflight_index` validates dir/files/n_chunks at startup with actionable messages; per-call `ConnectionError` (Ollama down) and generic `Exception` paths return structured `SearchResponse` with bounded `reason`; never raise empty-text isError
 - [ ] Step 5: Register in Claude Code config and run an end-to-end smoke test
