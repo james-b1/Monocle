@@ -129,6 +129,51 @@ Benchmark (approximate, varies ~10% run-to-run):
 | neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
 | **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
+## Running Phase 4 (in progress)
+
+The MCP server exposes Monocle's pipeline as a tool Claude Code can call natively. Right now it ships a single `ping` tool to verify the plumbing; Step 2+ will wire in the real `search_knowledge_base` tool backed by Phase 3.
+
+Run the server directly (reads JSON-RPC on stdin, writes on stdout — logs go to stderr):
+
+```bash
+PYTHONPATH=python .venv/bin/python -m monocle.mcp
+```
+
+Register it with Claude Code so you can call `ping` from any session:
+
+```bash
+# adjust the absolute paths to this repo
+claude mcp add monocle \
+    --env PYTHONPATH=/absolute/path/to/Monocle/python \
+    -- /absolute/path/to/Monocle/.venv/bin/python -m monocle.mcp
+
+# then in a new Claude Code session:
+#   /mcp       → should list "monocle" as connected
+#   ask Claude: "use the monocle ping tool with message='hi'"
+#
+# clean up later:
+#   claude mcp remove monocle
+```
+
+Protocol-level smoke test (no Claude Code required) — pipe an MCP handshake + `tools/call` to the server and print responses:
+
+```bash
+PYTHONPATH=python .venv/bin/python -c '
+import json, subprocess, os
+env = os.environ | {"PYTHONPATH": "python"}
+p = subprocess.Popen([".venv/bin/python","-m","monocle.mcp"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, env=env)
+def send(m): p.stdin.write(json.dumps(m)+"\n"); p.stdin.flush()
+def recv(): return json.loads(p.stdout.readline())
+send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}); print(recv())
+send({"jsonrpc":"2.0","method":"notifications/initialized"})
+send({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{"message":"hi"}}}); print(recv())
+p.terminate()'
+```
+
+Expected: `{"result": {..., "serverInfo": {"name": "monocle", ...}}}` then a tool call response containing `"pong: hi"`.
+
 ## Running Phase 3 (complete)
 
 Phase 3 wires Phases 1 + 2 together under an Ollama-driven state machine:
@@ -227,7 +272,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1, 2, and 3 complete.** Ready for Phase 4 (MCP server: expose as a Claude Code tool).
+**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP scaffolding up (Step 1 of 5); the `monocle` MCP server runs over stdio and exposes a `ping` smoke-test tool.
 
 ### Phase 1 — C++ vector engine
 
@@ -329,3 +374,11 @@ with open_index("data/index") as (index, meta):
 ```
 
 Pass `corpus_root` so the validator reads each chunk's full text (via `char_offset` + `char_length`) instead of just the 160-char preview. Without it, the validator can produce false negatives when relevant content sits mid-chunk; with it, the validator pays ~2× more latency (more input tokens) for sharper judgment.
+
+### Phase 4 — MCP server
+
+- [x] Step 1: Package scaffolding (`monocle.mcp`) — FastMCP server + `ping` smoke-test tool; stdio handshake verified with a real MCP client frame sequence
+- [ ] Step 2: Define `search_knowledge_base` tool schema (query, optional k)
+- [ ] Step 3: Wire the handler to Phase 3's `open_agent` (construct once, call via `asyncio.to_thread`)
+- [ ] Step 4: Error handling + stderr logging + graceful Ollama-down failure
+- [ ] Step 5: Register in Claude Code config and run an end-to-end smoke test
