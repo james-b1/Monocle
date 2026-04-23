@@ -129,7 +129,7 @@ Benchmark (approximate, varies ~10% run-to-run):
 | neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
 | **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
-## Running Phase 4 (in progress)
+## Running Phase 4 (complete)
 
 The MCP server exposes Monocle's pipeline as a tool Claude Code can call natively. Two tools are registered:
 
@@ -156,23 +156,32 @@ PYTHONPATH=python .venv/bin/python -m monocle.mcp \
     --max-attempts 2
 ```
 
-Register it with Claude Code so you can call `search_knowledge_base` from any session:
+Register it with Claude Code so you can call `search_knowledge_base` from any session in this project:
 
 ```bash
-# adjust the absolute paths to this repo
+# adjust the absolute paths to this repo. -e sets env vars; -- separates
+# claude flags from the subprocess command. Default scope is `local`
+# (private to you in this directory). Use `--scope project` to commit
+# the registration to .mcp.json instead.
 claude mcp add monocle \
-    --env PYTHONPATH=/absolute/path/to/Monocle/python \
+    -e PYTHONPATH=/absolute/path/to/Monocle/python \
     -- /absolute/path/to/Monocle/.venv/bin/python -m monocle.mcp \
        --index /absolute/path/to/Monocle/data/index \
        --root  /absolute/path/to/Monocle
 
-# then in a new Claude Code session:
-#   /mcp       → should list "monocle" as connected
-#   ask Claude: "search my knowledge base for 'what is Monocle?'"
-#
-# clean up later:
-#   claude mcp remove monocle
+# verify the entry + connection health
+claude mcp list             # should show "monocle: ... - ✓ Connected"
+claude mcp get monocle      # full config + status
+
+# clean up
+claude mcp remove monocle
 ```
+
+Then in a **new** Claude Code session (MCP servers are loaded at session start; this session won't see the new server until restart):
+
+- `/mcp` should list `monocle` as connected, with `search_knowledge_base` and `ping` as available tools.
+- Ask Claude something the corpus actually contains: *"Use the monocle search to find what this project says about ARM Neon SIMD."* Claude should pick `search_knowledge_base` from the tool list, call it, and surface the chunks.
+- For a tool-selection sanity check: ask Claude something the corpus *can't* answer (e.g., *"What's the population of Tokyo?"*) — it should NOT call `search_knowledge_base`, since the docstring scopes it to local-document questions only.
 
 Protocol-level smoke test (no Claude Code required) — pipe an MCP handshake + `tools/call` to the server and print responses:
 
@@ -292,7 +301,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1, 2, and 3 complete. Phase 4 in progress** — MCP server up (Steps 1–4 of 5); `monocle` exposes `search_knowledge_base` and `ping`, runs the real Phase 3 agent under a FastMCP lifespan, and degrades gracefully: bad index paths fail loudly at startup with actionable messages; per-call failures (Ollama down, etc.) return a well-formed `SearchResponse` with `is_relevant=false` and a useful `reason`.
+**Phases 1, 2, 3, and 4 complete.** Monocle is end-to-end: `claude mcp add monocle ...` and the `search_knowledge_base` tool is live in Claude Code, backed by the full Phase 3 LangGraph pipeline running over the Phase 1 SIMD search engine. Ready for Phase 5 (real-document integration testing).
 
 ### Phase 1 — C++ vector engine
 
@@ -401,4 +410,6 @@ Pass `corpus_root` so the validator reads each chunk's full text (via `char_offs
 - [x] Step 2: `search_knowledge_base` tool schema — Pydantic `SearchResponse`/`SearchHit` models; `Annotated[T, Field(...)]` parameter descriptions; `k` bounded `[1, 20]` at the schema level; stub handler returns realistic shape
 - [x] Step 3: Handler wired to Phase 3 — `build_server(index_dir, ...)` factory; FastMCP lifespan owns the agent; `asyncio.to_thread` bridges sync `graph.invoke` onto an async tool handler; CLI gains `--index`/`--root`/`--max-attempts`; graph_k clamped to `min(20, n_chunks)`
 - [x] Step 4: Error handling — `_preflight_index` validates dir/files/n_chunks at startup with actionable messages; per-call `ConnectionError` (Ollama down) and generic `Exception` paths return structured `SearchResponse` with bounded `reason`; never raise empty-text isError
-- [ ] Step 5: Register in Claude Code config and run an end-to-end smoke test
+- [x] Step 5: Registered with Claude Code via `claude mcp add monocle ... -- python -m monocle.mcp --index ...` (local scope); `claude mcp list` reports `✓ Connected`; client health probe completes the full MCP `initialize` handshake against our stdio server
+
+**Phase 4 headline:** `claude mcp add monocle ... -- python -m monocle.mcp --index data/index` registers the server; `claude mcp list` reports `monocle: ... - ✓ Connected`. From any Claude Code session in the project, `/mcp` shows `search_knowledge_base` as a callable tool that runs the full `rewrite → search → validate → (retry | END)` agent against the local SIMD-accelerated index. Ollama-down, missing-index, and generic per-call failures all return structured `SearchResponse` payloads instead of opaque errors.
