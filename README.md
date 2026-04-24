@@ -129,6 +129,55 @@ Benchmark (approximate, varies ~10% run-to-run):
 | neon (full scores) | ~1.0 ms | ~38.6 | ~11.5× |
 | **neon + top-k (fused, production)** | **~1.0 ms** | **~38** | **~11.5×** |
 
+## Running Phase 5 (in progress)
+
+End-to-end testing on a real corpus. The earlier phases used either synthetic vectors (Phase 1) or the project's own README as a stand-in (Phases 2/3/4); Phase 5 points Monocle at documents the user actually cares about.
+
+**Convention: the corpus lives outside the repo.** Monocle is a tool that reads documents, not a container for them. Put your notes somewhere like `~/projects/context_docs/` or `~/Documents/notes/`. The index (`data/index/`) stays inside the repo — it's a derived artifact.
+
+Why this matters for registration: `python/monocle/ingest/pipeline.py` stores filenames *relative to the ingest root*, and the validator reloads full chunk text using `--root + filename`. So the `--root` you pass to `python -m monocle.mcp` must match the directory you ingested from.
+
+### Switching to a new corpus
+
+```bash
+# 1. Ingest the new corpus (overwrites data/index/).
+PYTHONPATH=python .venv/bin/python -m monocle.ingest ~/projects/context_docs
+
+# 2. Re-register the MCP server with the matching --root.
+claude mcp remove monocle -s local
+claude mcp add monocle -s local \
+    -e PYTHONPATH=/Users/jamesbutts/projects/Monocle/python \
+    -- /Users/jamesbutts/projects/Monocle/.venv/bin/python -m monocle.mcp \
+       --index /Users/jamesbutts/projects/Monocle/data/index \
+       --root  /Users/jamesbutts/projects/context_docs
+
+# 3. Verify Connected, then restart Claude Code to pick up the change.
+claude mcp get monocle
+```
+
+### Standalone smoke test (3 questions)
+
+Run these via the Phase 3 CLI before bothering with a Claude Code restart — tight feedback loop, same pipeline:
+
+```bash
+PYTHONPATH=python .venv/bin/python -m monocle.agent \
+    --index data/index --root ~/projects/context_docs "<question>"
+```
+
+The three patterns worth exercising:
+
+| Pattern | Example query | What it verifies |
+|---|---|---|
+| **Specific lookup** | *"Why is binary tolerant to noise?"* | Top-k retrieves the right file; validator confirms relevant. |
+| **Conceptual / fuzzy** | *"What ethical framework does the paper use to argue against AI image training?"* | Rewriter doesn't distort intent; scores cluster in one document when the topic lives there. |
+| **Negative** | *"What is the capital of Australia?"* | Validator returns `is_relevant=False` on low-similarity noise instead of confabulating. The retry loop exhausts honestly, not optimistically. |
+
+A healthy run on the first two returns `Relevant: True` with top scores in the 0.3–0.7 range (cosine similarity; MiniLM is calibrated lower than cross-encoders). The negative query's top score should stay near zero with `Relevant: False` and a reason like *"off-topic and do not contain the answer"*.
+
+### End-to-end via Claude Code (next)
+
+After a session restart, `/mcp` should show `monocle: ✓ Connected` with `search_knowledge_base` available. Ask a corpus-specific question in natural language — Claude should pick the tool on its own, not because you named it. If Claude calls the tool for an obviously-not-in-corpus question (e.g., general world knowledge), that's a tool-description problem, not a retrieval problem.
+
 ## Running Phase 4 (complete)
 
 The MCP server exposes Monocle's pipeline as a tool Claude Code can call natively. Two tools are registered:
@@ -301,7 +350,7 @@ ingest(root=".", out_dir="data/index")
 
 ## Status
 
-**Phases 1, 2, 3, and 4 complete.** Monocle is end-to-end: `claude mcp add monocle ...` and the `search_knowledge_base` tool is live in Claude Code, backed by the full Phase 3 LangGraph pipeline running over the Phase 1 SIMD search engine. Ready for Phase 5 (real-document integration testing).
+**Phases 1–4 complete; Phase 5 in progress.** Monocle is wired end-to-end: `claude mcp add monocle ...` registers the `search_knowledge_base` tool in Claude Code, backed by the full Phase 3 LangGraph pipeline running over the Phase 1 SIMD search engine. Phase 5 smoke-tested on a real corpus (3 docs, 12 chunks) via the standalone agent — all three test patterns (specific lookup, conceptual, negative) behave correctly. Final verification is end-to-end through Claude Code with real user queries.
 
 ### Phase 1 — C++ vector engine
 
@@ -413,3 +462,12 @@ Pass `corpus_root` so the validator reads each chunk's full text (via `char_offs
 - [x] Step 5: Registered with Claude Code via `claude mcp add monocle ... -- python -m monocle.mcp --index ...` (local scope); `claude mcp list` reports `✓ Connected`; client health probe completes the full MCP `initialize` handshake against our stdio server
 
 **Phase 4 headline:** `claude mcp add monocle ... -- python -m monocle.mcp --index data/index` registers the server; `claude mcp list` reports `monocle: ... - ✓ Connected`. From any Claude Code session in the project, `/mcp` shows `search_knowledge_base` as a callable tool that runs the full `rewrite → search → validate → (retry | END)` agent against the local SIMD-accelerated index. Ollama-down, missing-index, and generic per-call failures all return structured `SearchResponse` payloads instead of opaque errors.
+
+### Phase 5 — Integration & real-world testing
+
+- [x] Step 1: Real corpus ingested — `~/projects/context_docs/` (3 files: 2 systems lectures + an ethics paper), 12 chunks produced
+- [x] Step 2: MCP server re-registered with `--root ~/projects/context_docs` to match the new ingest root; `claude mcp list` still reports `✓ Connected`
+- [x] Step 3: Standalone agent verified on 3 query patterns — specific lookup, conceptual/fuzzy, and negative; validator returns `is_relevant=False` on the off-topic query as designed
+- [ ] Step 4: End-to-end verification through Claude Code (fresh session) — tool selected by model on its own, negative case skipped, Ollama-down failure handled gracefully
+
+**Phase 5 headline (in progress):** Monocle answers natural-language questions over the user's own documents via the Phase 3 pipeline, with retrieval quality calibrated on three shapes of query. Final verification happens live in Claude Code.
